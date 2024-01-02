@@ -1,4 +1,4 @@
-# NYC311Mick
+# NYC311 Analysis
 Data Analysis &amp; Visualization 
 
 This is a  report that analyses the NYC311 call data. The NYC 311 call center provides the residents of New York city 24/7 help with more than 3600 non-emergency government services.The call center logs the service requests and complaints and routes it to the concerned government agencies. When the problem is resolved, the call log is closed. 
