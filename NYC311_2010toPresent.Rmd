@@ -1,0 +1,833 @@
+---
+title: "Final Project: What do the 311 calls tell us?"
+author: "Reshma Elizabeth Roy Kurian"
+date: '2018-03-15'
+output:
+  pdf_document: default
+header-includes: \usepackage{booktabs}
+#classoption: landscape
+geometry: "left=1cm,right=1cm,top=1cm,bottom=2cm"
+---
+
+```{r erasing, echo =FALSE}
+rm(list=ls())
+```
+
+```{r echo=FALSE}
+shh <- suppressPackageStartupMessages
+warn <- suppressWarnings
+shh(library (knitr))
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x,options) 
+  {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+```
+
+# Introduction
+This report analysis the NYC311 call data. The NYC 311 call center provides the residents of New York city 24/7 help with more than 3600 non-emergency government services.The call center logs the service requests and complaints and routes it to the concerned government agencies. When the problem is resolved, the call log is closed. 
+
+The objective of this project is to understand the NYC 311 data and explore possible solutions to predict/anticipate complaints. 
+This report will provide some insights which could help the agencies reduce the volume of different complaints in the future. 
+R has been used to conduct visual analytics on the data and to generate this report.
+NYC population census data and NYC Weather data are used in this project to analyse of the 311 call data from different perspectives.
+
+# Preparing the datasets 
+
+##1. Initialization & Reading of the 311 data file
+At the beginning of the rmd, the tidyverse packages & the `data.table` package are loaded. 
+Then the NYC311 data set is loaded and its column names are fixed to remove spaces.
+
+```{r initialize, echo = FALSE}
+options(scipen=999)
+shh(if (!require(tidyverse)){
+  install.packages('tidyverse', dependencies = TRUE)
+  shh(library(tidyverse))  
+})
+shh(library(data.table))
+
+shh(library(dplyr))
+  
+nyc311<-fread("/Users/rerk/Desktop/Data Analytics/311_Service_Requests_from_2010_to_Present.csv")
+#, nrows=100000)
+names(nyc311)<-names(nyc311) %>%
+  stringr::str_replace_all("\\s", ".")
+nyc311<-nyc311[sample(nrow(nyc311),1000),]
+```
+
+### Description of nyc311 dataset
+The Data in the 311 csv file has 52 columns and over 9Million rows(9124937 to be exact). 
+Each row in the file refers to a 311 complaint call and logs the nature, schedules and actions taken. 
+
+##2. Cleaning the nyc311 dataset
+
+###Removing duplicate rows
+The unique key column is removed and the rows are checked for duplication using distinct() and all_equal(). 
+```{r remove_dup, echo =FALSE}
+#Droppping unique key column before checking for duplicates
+nyc311<-nyc311[,-1]
+nyc311nodups<-distinct(nyc311) 
+all_equal(nyc311nodups,nyc311)
+#It returns the message "Different number of rows" which indicates that there are duplicate rows in the data. 
+```
+853538 rows are identified as duplicates and these are removed.
+```{r remove_nyc311nodups, echo =FALSE }
+#The dataset with duplicate rows is removed. 
+nyc311<-nyc311nodups
+rm(nyc311nodups)
+```
+The resulting dataset has 8271399 rows. 
+
+###Columns that are redundant/doesnt add value (26 columns in all) are dropped
+A description of the columns that are dropped is given in the appendix#2. This leaves nyc311_1 with 25 columns.
+```{r dropping_columns, echo =FALSE}
+nyc311_1<- nyc311[,-c(21,10,18,22,24,25,27,28,29,30,32, 33,34,16,17,35,36,37,38,39,40,41,44,47,48,51)]
+```
+
+###Removing rows given as Unspecified in Borough
+Borough column is cleaned for the entry "Unspecified" to retain only the rows with calls recieved from one of the 5 NewYork.
+```{r removerows, echo =FALSE}
+nyc311_1<-nyc311_1[!(nyc311_1$Borough=="Unspecified"),]
+```
+This removes 859,858 rows from the dataset and results in the nyc311 data with 7411541 rows. 
+
+###Formatting & modifying some relevant columns 
+1.Working on Date and time columns:
+There are 3 the date-time columns in the dataset namely, Closed.Date, Created.Date and Due.Date. All the 3 columns are of the datatype "chr". 
+In order to use these columns for data & time operations, their format are changed to POSIXct using Lubridate package.
+In addition the following columns are added to the data frame:
+RTime : This indicates the total time taken to resolve the complaint and is calculated as the difference between Closed Date and Created Date. 
+All erroneous rows with negative RTime are filtered out in this chunk. 
+Weekday: This column indicates the day of the week the complaint call was made. 
+Hr : This column indicates the hour the complaint call was made
+Mt:This column indicates the month the call was created
+Yr : This column indicates the Year of creation of the call service request
+Created.Date & Created.Time : The column Create.Date of the dataframe has both Date and Time which is separated into 2 columns with only Date in mdy format and only Time in hms format.
+This leaves 30 columns in the dataset.
+```{r datetimeconversion, echo =FALSE}
+shh(library(lubridate))
+nyc311_1<-nyc311_1 %>%
+  mutate(Created.Date=mdy_hms(Created.Date), Closed.Date=mdy_hms(Closed.Date), Due.Date=mdy_hms(Due.Date), RTime = difftime(Closed.Date,Created.Date,units="mins"),Weekday=wday(Created.Date, label=TRUE, abbr=FALSE), Hr=hour(Created.Date),Mt=month(Created.Date), Yr=year(Created.Date))
+
+#Separating Created Date into Date and Time for facilitating join suing Date column
+nyc311_1<-separate(nyc311_1,Created.Date,into=c('Created.Date','Created.Time'), sep = ' ')
+
+#Removing all erroneous entries (1461954 in total) with 0 or negative resolution time. 
+nyc311_1<- nyc311_1 %>%
+  filter(RTime>1 | RTime =="NA")
+```
+2.Modification of Street columns 
+Cross streets and Intersection streets are joined for better readability.The resulting data frame is nyc311_1. 
+This data frame and its subsets will be used for exploration and analysis of the 311 data.
+It has 26 columns and 8065672 rows of 311 calls. 
+```{r modifying columns, echo =FALSE}
+#Removing Garage.Lot.Name, Bridge.Highway.Name, Park.Facility.Name as they are redundant with Location.Type 
+nyc311_1<-nyc311_1[,-c(19,21,24)]
+
+#Uniting the 2 columns of Cross Streets
+nyc311_1<-nyc311_1 %>%
+  unite(Cross.Streets,Cross.Street.1,Cross.Street.2, sep = '/')
+
+##Uniting the 2 columns of Intersection Streets
+nyc311_1<-nyc311_1 %>%
+  unite(Intersection.Streets,Intersection.Street.1,Intersection.Street.2, sep = '/')
+```
+
+###Creating a dataframe from a subset of nyc311 only for noise complaints
+```{r noisealone, echo =FALSE}
+nycnoise<-nyc311_1 %>%
+  filter(str_detect(Complaint.Type, "Noise"))
+```
+
+###Creating a dataframe from a subset of nyc311 only for heat related complaints
+```{r heatalone, echo =FALSE}
+nycheat<-nyc311_1 %>%
+  filter(str_detect(Complaint.Type,paste(c("HEAT", "Heat"), collapse ='|')))
+```
+
+###Sampling 100000 rows for testing code chunks
+A sample of 100000 rows are taken from nyc311 to use with maps.
+```{r sampling, echo =FALSE}
+nyc311sample<-nyc311_1[sample(nrow(nyc311_1),100000),]
+```
+
+## The NYC311  data table
+Find below a table with some relevant columns from NYC311.
+
+```{r tabulate1, results="asis", echo =FALSE}
+shh(library(tinytex))
+shh(library(pander))
+narrow<-nyc311_1 %>%
+  select(Agency,
+	 Complaint.Type,
+	 Status,
+	 Borough, Hr, Mt, Yr,RTime, Created.Date, Location.Type)
+pander(head(narrow))
+```
+#Reading the New York Census population file for all counties of New York. 
+This file has population data from 1970 to 2018 for New York. It will be read with all spaces in column names replaced with a dot. For example, Program Type becomes Program.Type
+
+```{r newfile, echo =FALSE}
+nycpop<-fread("Annual_Population_Estimates_for_New_York_State_and_Counties__Beginning_1970.csv")
+names(nycpop)<-names(nycpop) %>%
+  stringr::str_replace_all("\\s", ".")
+```
+
+##Description
+The population dataset contains census data of New York counties. Census data is collected once every decade and population estimations are made there after and corrections made to previous estimations. The data in this dataset is based on the 2010 census.
+The data includes "intercensal estimates" for 1970-2009 and postcensal estimates for 2010-2018 and the decennial Census counts for 1970-2010. 
+This contains 3339 observations and has 5 columns as listed in the data dictionary in the appendix.
+
+
+##Cleaning the population dataset
+###Selecting relevant rows from  nycpop.
+The selection criteria used are: 
+keep only those rows for the years 2009 to 2015 & keep only those rows corresponding to the 5 Boroughs.
+The FIPS codes corresponding to the NY boroughs are 
+36005 for Bronx, 
+36047 for Brooklyn/Kings, 
+36061 for Manhattan/New York, 
+36081 for Queens & 
+36085 for Staten Island/Richmond
+```{r relevantrows, echo =FALSE}
+nycpop<-filter(nycpop, Year %in%(2009:2015) & FIPS.Code %in% c(36005,36047,36061,36081,36085) )
+
+```
+
+###Preparing the population dataset for joining with nyc311
+2 columns are prepared for the join with nyc311:Year & Geography 
+1. The Year column is formatted to numeric so it can match with Yr from nyc311
+2. Entries in the column "Geography: of nycpop will be renamed to their corresponding Borough names so that they can match with entries of the column Borough in NYC311. This column, thus, can be made the common column for the join with nyc311.
+The following replacement will be done for the values in Geography
+BRONX will replace Bronx County
+BROOKLYN will replace Kings County
+MANHATTAN will replace New York County
+QUEENS will replace Queens County
+STATEN ISLAND will replace Richmond County
+
+Rows for 2010 with Postcensal Population Estimate are removed, so that the 2010 rows for each borough has the Censal Base Population numbers. After removing these 5 rows, the Program.Type column is dropped.
+FIPS Code is also dropped as it is redundant with Geography
+
+```{r renaming_Geography, echo =FALSE}
+shh(library(stringr))
+nycpop<-nycpop%>%
+  mutate(Geography = str_replace_all(Geography, "Bronx County", "BRONX"), Geography = str_replace_all(Geography, "Kings County", "BROOKLYN"), Geography = str_replace_all(Geography, "New York County", "MANHATTAN"), Geography = str_replace_all(Geography, "Queens County", "QUEENS"), Geography = str_replace_all( Geography, "Richmond County","STATEN ISLAND"))
+
+# Removing FIPS Code as it gives the same information as Geography
+nycpop<-nycpop[,-1]
+
+#Converting Year from integer to numeric to facilitate join with 311 dataset 
+nycpop<-nycpop %>%
+  mutate(Year = as.numeric(as.character(Year)))
+
+#Removing rows with Postcensal Population Estimate for the year 2010 as Censal Base Population data is available for 2010
+nycpop<- nycpop %>% 
+  mutate(Program.Type = ifelse(Year == 2010, ifelse(Program.Type=="Census Base Population", Program.Type, NA), Program.Type)) %>%
+  filter(!(is.na(Program.Type)))
+
+#Removing the column Program Type as all rows except that of 2009 have Postcensal Population Estimate and 2009 has Intercensal Population Estimate
+nycpop<-nycpop[,-3]
+
+```
+## The head of the population data table
+Here we produce a header table with some rows of data.
+
+```{r tabulate5, results="asis", echo =FALSE}
+pander(head(nycpop))
+```
+
+
+#Reading file with New York daily weather data 
+```{r reading weather, echo =FALSE}
+nycweather<-fread("nycweather.csv")
+```
+
+## Description
+This dataset gives the daily weather information of New York from 2009 to 2015 and was obtained from the National Oceanic and Atmospheric Administration (NOAA).  
+All the data in this dataset were measured and collected from the weather station at JFK International Airport.
+It contains 2556 rows and has 30 columns as listed in the data dictionary.
+
+
+## Cleaning the weather dataframe
+###Removing irrelevant columns
+Dropping columns STATION and NAME :all data are measured from the same weather station (USW000094789) located in JFK International Airport. 
+```{r tidying, echo =FALSE}
+nycweather<-nycweather[,c(-1,-2)]
+```
+
+###Populating the Daily Average temperature TAVG for all rows. 
+The average temperature, TAVG is not NA only for rows from April 2013. So, TAVG is calculated from TMAX and TMIN and populated for all rows. 
+```{r Tmean, echo =FALSE}
+shh(library(tidyr))
+nycweather<- nycweather %>%
+  mutate(TAVG = ((TMAX+TMIN)/2) )
+```
+
+##Creating an Extreme weather data frame (nycweatherextr) from the weather dataframe. 
+All columns with Weather Type data i.e., columns 10 to 28 labelled WT01 and so on. All these different WT columns are gathered into a single column.for a dataframe of values with extreme weather condition
+
+```{r gathe, echo =FALSE}
+
+nycweather_1<- nycweather %>% 
+  gather(WT01,WT02,WT21,WT22, WT03,WT04,WT05,WT06,WT07,WT08,WT09,WT11,WT13,WT14,WT15,WT16,WT17,WT18,WT19,key ='WEATHER', value =  'WT') 
+
+#Gathering all related weather types together into a single column
+nycweather_1<-nycweather_1[!(nycweather_1$WT==""),] %>%
+  mutate(WEATHER=ifelse(WEATHER %in% c('WT01','WT02','WT21','WT22'),'FOG',ifelse(WEATHER %in% c('WT15','WT16','WT17','WT14','WT19'),'RAIN',ifelse(WEATHER %in% c('WT18','WT04','WT05','WT09'),'SNOW',ifelse(WEATHER =='WT03','THUNDER',ifelse(WEATHER =='WT06','RIME',ifelse(WEATHER=='WT07','DUST',ifelse(WEATHER=='WT08','SMOKE',ifelse(WEATHER=='WT11', 'WIND',ifelse(WEATHER=='WT13','MIST',NA)))))))))) 
+
+#Removing the column WT as it contains the same value 1.
+nycweather_1<-nycweather_1[,-11]
+
+
+#Removing any duplicate rows
+nycweather_ext <- distinct(nycweather_1)
+rm(nycweather_1)
+```
+
+## The head of the weather data table
+Here we produce a header table with some rows of data.
+
+```{r tabulate_weather, results="asis", echo =FALSE}
+nycweather_head<-nycweather %>%
+  select(DATE,AWND,PRCP,SNOW,TAVG,TMAX,TMIN,WESD)
+warn(pander(head(nycweather_head)))
+```
+
+
+#Joining datasets 
+
+##A.Joining 311 dataframe and Population dataframe
+nyc311 is joined with the population dataframe nycpop on the columns with Borough and Year data. 
+The join is a left join and gives 7411541 rows and 7 columns.
+```{r join_pop, echo =FALSE}
+nyc311_pop<-nyc311_1 %>%
+  select(Created.Date, Complaint.Type, Agency, Borough, Hr, Yr,Location.Type)
+nyc_popjoin<-left_join(nyc311_pop,nycpop, by = c("Borough"="Geography","Yr"="Year"))
+```
+
+## Table of the population and nyc311 join data
+Here the columns of the joined dataframe and a few rows are displayed
+```{r tabulate2, results="asis", echo =FALSE}
+
+pander(head(nycpop))
+#xtable(head(nycpop),row.names= FALSE)
+```
+
+##Joining 311 noise dataframe and Population dataframe
+nyc311 is also joined to the noise dataframe for analysis of noise complaints with population.
+```{r join_nycpop, echo =FALSE}
+nyc311_npop<-nycnoise %>%
+  select(Created.Date, Complaint.Type, Agency, Borough,Hr, Yr,Location.Type)
+nyc_npopjoin<-left_join(nyc311_npop,nycpop, by = c("Borough"="Geography","Yr"="Year"))
+```
+
+## Table with the population and nyc311 join data only for noise complaints 
+This table displays noise data information with the population. It diplays a few rows with the columns Complaint.Type, Borough, Hr, Yr and Population.
+
+```{r tabulate4, results="asis", echo =FALSE}
+
+nycpopnoise<-nyc_popjoin %>%
+  select(Complaint.Type, Borough,Hr,Yr, Population)%>%
+  filter(str_detect(Complaint.Type, "Noise") )
+pander(head(nycpopnoise))
+```
+
+##B.Joining 311 dataframe and the Weather dataframe
+```{r join_nycweather, echo =FALSE}
+nyc311_w<-nyc311_1 %>%
+  select(Created.Date, Complaint.Type, Borough, RTime, Hr,Location.Type)
+nycweather<- nycweather[,-c(10:28)]
+nyc_weatherjoin<-left_join(nyc311_w,nycweather, by = c("Created.Date"="DATE"))
+```
+
+### The head of the weather data table
+Here we produce a header table with some rows of data.
+```{r extremetab, results="asis", echo =FALSE}
+pander(head(nyc_weatherjoin))
+#xtable(head(narr1), row.names= FALSE)
+```
+
+##C.Joining 311 dataframe and the Extreme Weather dataframe
+```{r join_nycextremeweather, echo =FALSE}
+nyc_extremeweatherjoin<-right_join(nyc311_w,nycweather_ext, by= c("Created.Date"="DATE"))
+```
+
+### The head of the extreme weather data table
+Here we produce a header table with some rows of data.
+
+```{r tabulate6, results="asis", echo =FALSE}
+narr1<-nyc_extremeweatherjoin %>%
+  select(Complaint.Type,
+	 Borough,
+	 Hr, Location.Type, WEATHER) %>%
+  filter(WEATHER!="NA")
+pander(head(narr1))
+```
+
+##D.Joining 311 dataframe with Heat complaints and the Weather dataframe
+```{r join_heatweather, echo =FALSE}
+nyc_heatjoin<-left_join((nycheat %>%
+  select(Created.Date, Complaint.Type, Borough, RTime, Hr,Location.Type)),nycweather_ext, by = c("Created.Date"="DATE"))
+```
+
+### Table with data on heat complaints and weather
+Here we produce a header table with some rows of data.
+
+```{r tabulate3, results="asis", echo =FALSE}
+#options(xtable.comment=FALSE)
+#options(xtable.booktabs=TRUE)
+narr<-nyc_heatjoin %>%
+ select(Complaint.Type,
+ Borough,
+ Hr, Location.Type,TAVG, WEATHER) 
+pander(head(narr))
+#xtable(head(narr), row.names= FALSE)
+```
+
+#Exploration of the NYC311 
+The data available include the primary data from nyc311, population data and weather data. 
+Every 311 call is associated with 3 things:
+WHAT:Complaint Type, 
+WHEN: the date-time of call & when it gets resolved, 
+WHERE: the location of call.
+Exploratory analytics was done on these 3 aspects to look for patterns and insights.
+
+##Complaint Types & Agencies 
+Complaints and agencies are analysed to find the most common complaints and the agencies that deal with most calls.
+```{r explore_commonComplaints, echo =FALSE}
+warn(tbl<-sort(table(nyc311_1$Complaint.Type), decreasing=TRUE)[1:7])
+warn(a<-ggplot(as.data.frame(tbl),aes(Var1,Freq, fill=Var1))+
+   geom_bar(stat="identity")+
+     coord_flip()+
+  labs(x="",y="No.of 311 calls", title="COMPLAINT ANALYSIS")+
+  ylim ("")+
+  theme(panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  plot.background = element_rect(fill = "transparent",colour = "gray"),
+  plot.title = element_text(hjust = 0.5))+
+    theme(axis.text.x=element_text(angle=0))+
+  theme(legend.position = "none"))
+```
+
+
+```{r explore_Agency, echo= FALSE}
+shh(library(ggplot2))
+#tbl<-sort(table(nyc311_1$Agency), decreasing=TRUE)[1:4]
+bigAgency <- narrow %>% 
+  group_by(Agency) %>% 
+  summarize(count=n()) %>% 
+  filter(count>10000) 
+  bigAgency$Agency<-factor(bigAgency$Agency, 
+  levels=unique(bigAgency$Agency[order(bigAgency$count)]))
+
+warn(b<-ggplot(bigAgency,aes(x=Agency,y=count, fill=Agency)) + geom_bar(stat="identity") +
+  theme(panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  plot.background = element_rect(fill = "transparent",colour = "gray"),
+  plot.title = element_text(hjust = 0.5))+
+  theme(legend.position="none")+
+labs(caption = "based on data from NYC 311", y="No. of 311 calls", title="AGENCY ANALYSIS", x="")+
+  ylim("")+ coord_flip())
+shh(require(cowplot))
+theme_set(theme_cowplot(font_size=12))
+theme(axis.text.x=element_text(angle=70,vjust=0.5))
+plot_grid(a,b)
+```
+Complaint Analysis: nyc311 data is sorted by Complaint.Type and top 7 Complaint Types are found as shown in the figure on the left.
+Agency Analysis: Rows are grouped by Agency and those with incidence > 10000 are displayed in the figure on the right.
+
+##Where are the 311 calls made from?
+The plot illustrates the number of calls received by borough. 
+```{r explore_borough, echo =FALSE,fig.align="right"}
+bigBorough <- narrow %>%
+  group_by(Borough) %>%
+  summarize(count=n()) 
+
+bigBorough$Borough<-factor(bigBorough$Borough,
+ levels=bigBorough$Borough[order(bigBorough$count)])
+
+warn(q<-ggplot(bigBorough,aes(x=Borough,y=count, fill = Borough)) +
+  geom_bar(stat="identity")+
+  geom_label(aes(label=count),nudge_x=0,nudge_y=1, check_overlap=TRUE)+
+    theme(legend.position="none")+
+  labs(y="", x="",caption = "based on data from NYC311", title ="CALLS FROM  BOROUGHS"))
+q
+```
+Brooklyn & Queens receive the most 311 calls whereas Staten Island receives the fewest number of calls.
+
+##Resolution within an hour in the 3 big agencies
+This plot explores the correlation between the number of cases in each Borough resolved within an hour by HPD, NYPD and DOT and day of the week.
+Insights: HPD takes more than an hour to resolve most cases.The resolution is slower on weekends at HPD and DOT. 
+NYPD shows similar resolution numbers through out the week.  
+```{r Agencyplot, echo =FALSE}
+nyc311plot1<-dplyr::filter(nyc311_1, RTime <61 & (Agency == "NYPD" | Agency == "HPD"| Agency == "DOT"))
+warn(ggplot(data=nyc311plot1) +
+  geom_bar(mapping = aes(x= Agency, fill = Weekday )) +
+  coord_flip()+
+  labs(y="No.of 311 calls", caption = "based on data from NYC311", title= "RESOLUTION WITHIN AN HOUR")+
+    ylim("")+
+ facet_wrap(~Borough))
+```
+
+Comments: Confirms earlier findings from the plot for agencies.Most Heating Complaints arent solved within an hour. Resoliution time is longer on Weekends. Street Light and Street Condition related complaints are resolved quicker in Queens than in Brooklyn.
+
+##Which days of the week receives the most calls in each borough?
+A coxcomb chart is used to dislay the relationship between number of calls, Weekday & Borough.
+```{r borough_weekday, echo =FALSE, fig.align= "left"}
+warn(ggplot(data=nyc311_1)+
+  geom_bar(mapping=aes(x=Weekday, alpha= 1/4, fill = Borough, position="identity"))+
+  coord_polar() +
+  labs(title="COXCOMB CHART", y="No. of calls",caption = "based on data from NYC311"))
+```
+
+Comments: The chart shows the distribution of calls in Boroughs on weekdays is very similar. 
+Tuesday, Wednesday and Thursdays are the day on which the call center is the most busiest.
+Friday and Mondays  are less busier days. Calls are fewier on weekends, the least on Sundays.
+
+##Exploring correlation between weather & 311 calls
+```{r exploreTavg, echo=FALSE}
+#Plotting all complaints vs average temperature    
+nyc_weathert<-nyc_weatherjoin %>%
+  group_by(Complaint.Type,TAVG)%>%
+  summarize(count=n())  
+warn(ggplot(nyc_weathert, aes(TAVG,count, color="red"))+
+       geom_line()+
+        labs( y="Complaints", x= "Average temperature",caption="based on NYC311 data", title="CALLS & WEATHER")+
+       theme(legend.position="none"))
+```
+The figure shows that more complaints are made on colder days. 
+
+##Noise evolution over the years across boroughs 
+```{r noiseevolution, echo =FALSE}
+nc<-filter(nycnoise, str_detect(Complaint.Type,"Noise"))
+warn(ggplot(nc, aes(x=Yr))+
+  geom_freqpoly(aes(color=Borough), binwidth=0.25)+
+  labs(title="NOISE EVOLUTION", y= "Noise calls", x= "Year", caption="based on NYC311 data")+xlim(2009,2016))
+```
+
+This frequency polygon shows the evolution of Noise complaint over the years across Boroughs. 
+Manhattan shows the most Noise complaints.  2013 saw a spike in Noise complaints in Brooklyn and Manhattan. Highly effective corrective measures seem to have been employed in Manhattan & Brooklyn  as the numbers dropped to less than a quarter in 2015. 
+
+##Mapping noise complaint calls to their location
+```{r new_map, echo =FALSE}
+# Get NYC map in Black and White
+shh(if(!requireNamespace("devtools"))
+  { shh(install.packages("devtools"))
+})
+devtools::install_github("dkahle/ggmap", ref = "tidyup")
+complaintlocs <- nyc311sample %>% 
+  select(Complaint.Type,Longitude,Latitude)
+noisecompl <- complaintlocs %>% filter(Complaint.Type== "Noise")
+
+warn(shh(library(ggmap)))
+key<-"AIzaSyAA_1QASDfsO-9ZyPFlV5CVnex49lJmBMA" 
+register_google(key = key)
+nyc_map = get_map(location = c(lon= -73.9, lat= 40.7),
+maptype = "terrain", zoom =12, source = 'google')
+warn(map <- ggmap(nyc_map) + geom_jitter(data=noisecompl,aes(x=Longitude,y=Latitude),
+size= 1.2, alpha=0.6, color= "red") + ggtitle("Map of 311 calls") +
+theme(plot.title = element_text(hjust = 0.5)) + xlab("Longitude") + ylab("Latitude")+
+  labs(caption = "(based on data from NYC 311)"))
+
+warn(map)
+```
+
+The map shows the distribution of calls over New York for Noise complaints. Manhattan is evidently the borough with most Noise complaints from the sample used.
+
+##Exploring Noise Complaints by hour
+```{r hourly comparison, echo =FALSE}
+#rm(nyc311hr)
+nyc311hr<- nyc311sample%>%
+ group_by(Hr, Borough , Complaint.Type) %>%
+  summarize(count= n())%>%
+ filter (Complaint.Type == "Noise")
+warn(h<-ggplot(nyc311hr, aes(x=Hr, y = Borough))+
+  geom_tile(mapping=aes(fill= count)))
+h
+```
+This tile plot confirms that Manhattan has the most number of noise complaints among the boroughs. There are more noise complaint calls made between 9 in the evening and 2 in the morning from Manhattan. This could indicate that there are noisier evening activities in Manhattan. 
+
+
+##Weekday noise complaint distribution 
+```{r noise_borough_weekday, echo =FALSE}
+#rm(nyc_noise)<- filter(nyc311_1, Complaint.Type== "Noise")
+warn(ggplot(data=nycnoise)+
+  geom_bar(mapping=aes(x=Weekday, alpha= 1/4, fill = Borough, position="identity"))+
+  coord_polar() +
+  labs(title="NOISE COXCOMB", y= "",x="",caption = "(based on data from NYC 311)"))
+```
+The Combchart shows that most noise complaints are made on Saturdays. Surprisingly Fridays and Sundays have fewer noise complaint calls. 
+
+##Noise complaints weekdays and Hr
+```{r noiseWh, echo =FALSE}
+nyc_man<-filter(nycnoise, Borough=="MANHATTAN")
+warn(ggplot(data=nyc_man)+
+  geom_bar(mapping=aes(x=Hr, fill = Weekday ))+
+  facet_wrap(~Weekday)+coord_flip()+
+    labs(caption= "based on NYC311 data"))
+```
+Here, the noise complaints from Manhattan is analysed for the days and the time of complaints.
+As confirmed in earlier analysis, Saturday shows a peak in average number of noise complaints received per hour. However, the most calls are recieved in the day time with a peak around 9am. 
+For the remaining days, most complaints follow the similar pattern for noise complaints. Most complaints are lodged in the between 9pm and 2am. 
+
+##Trend of complaints per resident and noise complaints per resident over the years across boroughs
+```{r line_allcomplaints, echo =FALSE}
+nycpopjoin<-nyc_popjoin
+nycpopjoin<-nycpopjoin %>% 
+  group_by(Borough,Yr,Population) %>%
+  summarize(count=n()) %>%
+  filter(Yr %in% (2009:2015)) %>%
+  mutate (Callpop = count/Population*100)
+warn(c<-ggplot(nycpopjoin)+
+  geom_line(aes(x=Yr,y=Callpop, color= Borough))+
+       labs(y="Calls", title = "PER CAPITA CALLS ")+
+    theme(legend.position = "none"))
+```
+
+```{r line_noise, echo =FALSE}
+nycnpopjoin<-nyc_npopjoin
+nycnpopjoin<-nycnpopjoin %>% 
+  group_by(Borough,Yr,Population) %>%
+  summarize(count=n()) %>%
+  filter(Yr %in% (2009:2015) ) %>%
+  mutate (Callnpop = count/Population*100)
+
+warn(d<-ggplot(nycnpopjoin)+
+  geom_line(aes(x=Yr,y=Callnpop, color= Borough))+
+  labs(caption = "based on data from NYC311", title="PER CAPITA NOISE CALLS", y ="Calls"))
+
+theme_set(theme_cowplot(font_size=12))
+theme(axis.text.x=element_text(angle=70,vjust=0.5))
+plot_grid(c,d)
+```
+This figure on the left shows that 311 call rate is highest for Manhattan followed by Bronx , Brooklyn, Staten Island and then by Queens. 
+It is interesting to note that the number of calls per resident of Bronx was the least among New York Boroughs until the 2nd half of 2010, after which it Bronx residents have made the most 311 calls. This could be caused by the close to 2% increase in population from 2009 to 2011 in Bronx.
+Also, Queens has the least 311 calls per capita indicating either low awareness or better facilities.
+
+The visualization above shows the evolution of noise complaints per person in each Borough over the years 2009 to 2015. The rate of calls increased in 2014 across New York in 2014 and dipped in 2015.
+
+
+
+##Exploring types of noise complaints
+```{r noiseploration, echo =FALSE}
+nycnoisexp<- nycnoise%>% 
+  select(everything()) %>%
+  group_by(Complaint.Type, Yr) %>%
+dplyr::summarize(count=n()) %>%
+  filter(Yr %in% (2010:2015))
+
+warn(ggplot(nycnoisexp, color=Complaint.Type) +
+   geom_bar(mapping=aes(x=reorder(Complaint.Type,count),y =count,fill=Complaint.Type),stat="identity")+
+  coord_flip()+
+    theme_bw()+
+  ylim("")+
+  labs(y="No. of 311 calls", caption = "based on data from NYC311", title= "NOISE COMPLAINT TYPES",x="")+
+  facet_wrap(~Yr))
+```
+This figure shows that the Commercial noise complaints have increased over the years until it dropped in 2014-2015. 
+Noise compaints from Vehicles had been constant until it dropped in 2015. 
+The measures taken to drop calls in 2015 can be continued to furthur reduce noise complaints.
+
+##Exploring correlation between weather & 311 noise calls
+```{r exploreT, echo=FALSE}
+#Plotting noise complaints vs average temperature 
+nyc_weathertot<-nyc_weatherjoin %>%
+  group_by(Complaint.Type,TAVG)%>%
+  summarize(count=n()) %>%
+  filter(str_detect(Complaint.Type, "Noise") )
+warn(ggplot(nyc_weathertot, aes(TAVG,count, color=Complaint.Type))+
+       geom_line()+
+       theme(legend.position = "bottom")+
+        labs(caption = "based on data from NYC311", y="Noise Complaints", x= "Average temperature", title="NOISE COMPLAINTS & WEATHER"))
+
+#theme_set(theme_cowplot(font_size=12))
+#theme(axis.text.x=element_text(angle=70,vjust=0.5))
+#plot_grid(t,r)
+```
+This plot indicates that noise complaints have quite the opposite trend. There are more noise complaints on warmer days.This could be because people engage in more "noisy" activities such as park noise, party noise etc on warmer days.
+
+
+##Exploring correlation between heat complaints & average temperature related to heating
+```{r exploreHeatcomplaintsWEATHER, echo = FALSE}
+
+#Plotting heat complaints vs average temperature 
+nyc_weathertot1<-nyc_weatherjoin %>%
+  group_by(Complaint.Type,TAVG)%>%
+  summarize(count=n()) %>%
+  filter(str_detect(Complaint.Type,"HEAT"))
+
+warn(s<-ggplot(nyc_weathertot1, aes(TAVG,count, color=Complaint.Type))+
+       #geom_line(linend="butt", linejoin = "round",linemite=1)+
+       geom_line()+
+        labs( x="Average temperature", y="Heat calls")+
+       coord_flip()+
+       theme(axis.text.x=element_text(angle=45,hjust=0.5))+
+       theme(legend.position = "bottom")+
+       theme(
+         panel.grid.major.y=element_blank(),
+         panel.border=element_blank(),
+         axis.ticks.y = element_blank()))
+
+#Visualizing using heat subset join of nyc311
+nyc_heatcount<-nyc_heatjoin %>%
+  group_by(TAVG) %>%
+  summarize(heatcount=n())
+nyc_heatcount<-filter(nyc_heatcount, TAVG != "NA")
+
+warn(q<-ggplot(nyc_heatcount, aes(x=heatcount, y=TAVG))+
+      geom_segment(aes(x=heatcount, xend=heatcount, y=60, yend=TAVG), color="red")+
+       geom_point(color="cyan", size=0.5, alpha=1)+
+       theme(
+         panel.grid.major.y=element_blank(),
+         panel.border=element_blank(),
+         axis.ticks.y = element_blank())+
+       xlim(0,15000)+
+       ylab("Average temperature")+
+       xlab("Heat calls")+
+       labs(caption = "based on data from NYC311")+
+       theme_set(theme_cowplot(font_size=12)))
+      
+warn(theme_set(theme_cowplot(font_size=12)))
+warn(theme(axis.text.x=element_text(angle=90,hjust=0.5)))
+plot_grid(s,q)
+```
+The figure on the left shows that the number of heat related complaints, mainly related to HEATING are higher during lower average tempertures. 
+This is confirmed in the figure on the right which indicates that heat related complaints can be expected when the mercury drops below 60 degrees. More agents could be deployed at HPD when forecasts of colder temperatures are announced. 
+
+#Conclusion
+From the analysis done, the following insights can be used for predicting the possibility of a complaint and taking proactive actions:
+
+Heat related complaints-
+Heat related complaints are the most common complaints of New Yorkers across boroughs. The resolution time taken by HPD is much longer than other agencies(Not one complaint is solved in under an hour). 
+The number of Heat complaints escalate as the mercury drops.
+=>HPD could anticipate more calls when colder days are announced and deploy more personnels.
+
+Noise Complaints-
+Noise complaints are one of the other complaint that has been analysed. 
+Manhattan has the most noise related complaints. 
+The call density is highest between 9pm-2am on warmer days and more on the weekends than on weekdays.
+=>Evening activities such as parties in Manhattan could be responsible for this. Improving patrolling in the night to curb noisy activities could reduce these calls.There has been a very significant drop in noise complaints in 2015. The measures taken can be reproduced to furthur bring down noise complaints.
+
+Queens- It has the 2nd largest proportion of calls and has the 2nd largest population. But it has the least per capita calls despite its large population. Queens has a good responsive team who solve Street Light and Street Condition related complaints within an hour. 
+=>The good records in Queens could be either due to lack of awareness or better response time from agencies. This need to be investigated and best practices can be shared to improve the call rates in other Boroughs. Brooklyn in particular could benefit in high volumes as it receives the maximum number of 311 complaint calls with Complaints related to Heating and Street Condition being the most common. 
+
+#Appendix
+
+##1. Data Dictionary of nyc311
+1.  Unique Key: Unique Identifier of service request (SR) call in the open data set
+2.  Created Date: Date the call was made and SR was created
+3.  Closed Date: Date SR was closed by responding agency
+4.  Agency:Acronym of responding city government agency
+5.  Agency Name: Full agency name of responding city government agency
+6.  Complaint Type: This is the first level of a hierarchy identifying the topic of the incident or condition.
+7.  Descriptor:	This is associated to the Complaint Type, and provides further detail on the incident or condition. Descriptor values       are dependent on the Complaint Type, and are not always required in SR.
+8.  Location Type:	Describes the type of location used in the address information
+9.	Incident Type:	10479 zip code depending on the area 
+10.	Incident Address:	House number of incident address provided by submitter.
+11.	Street Name:	Street name of incident address provided by the submitter
+12.	Cross Street 1:	First Cross street based on the geo validated incident location
+13.	Cross Street 2:	Second Cross Street based on the geo validated incident location
+14.	Intersection Street 1:	First intersecting street based on geo validated incident location
+15.	Intersection Street 2:	Second intersecting street based on geo validated incident location
+16.	Address Type:	Type of incident location information available.
+17.	City:	City where the Incident occurred
+18.	Landmark:	If the incident location is identified as a Landmark the name of the landmark will display here
+19.	Facility Type:	If available, this field describes the type of city facility associated to the SR
+20.	Status:	Status of SR
+21.	Due Date:	Date when responding agency is expected to update the SR
+22.	Resolution.Action.Updated.Date:	Date when responding agency last updated the SR.
+23.	Community Board:	This indicated the community district where the incident occurred
+24.	Borough: Bronx, Brooklyn, Manhattan, Queens, Staten Island 
+  	Borough	Provided by the submitter and confirmed by geo validation.
+25.	X coordinate:	Geo validated, X coordinate of the incident location.
+26.	Y coordinate:	Geo validated, Y coordinate of the incident location.
+  	Open Data channel type:	Indicates how the SR was submitted to 311. i.e. By Phone, Online, Mobile, Other or Unknown.
+27.	Park Facility Name:	If the incident location is a Parks Dept facility, the Name of the facility will appear here
+28.	Park Borough:	The borough of incident if it is a Parks Dept facility
+29.	School Number: 	Schools registered number 
+30.	School Name: 	Name of school
+31.	School Region: 	Region of the school
+32.	School Code: 	School’scode 
+33.	School Phone: 	School phone number 
+34.	School Address:	School complete address 
+35.	School City	:City of the schools location 
+36.	School State:	Which state the school is based in
+37.	School Zip 	:School zip code 
+38.	School not found :	Has the value Y when School isnt found . Else has the value N or " ". 
+39.	School or city wide complaint :	Complaint type 
+40.	Vehicle Type:	If the incident is a taxi, this field describes the type of TLC vehicle.
+41.	Taxi Company Borough:	If the incident is identified as a taxi, this field will display the borough of the taxi company.
+42.	Taxi Pick Up Location	:If the incident is identified as a taxi, this field displays the taxi pick up location
+43.	Bridge Highway Name	:If the incident is identified as a Bridge/Highway, the name will be displayed here.
+44.	Bridge Highway Direction :	Direction of the highway 
+45.	Road Ramp :	If the incident location was Bridge/Highway this column differentiates if the issue was on the Road or the Ramp.
+46.	Bridge Highway Segment :	Additional information on the section of the Bridge/Highway were the incident took place.
+47. Garage.Lot.Name: Related to DOT Parking Meter SR, this field shows what garage lot the meter is located in              
+48. Ferry.Direction: Used when the incident location is within a Ferry, this field indicates the direction of ferry           
+49. Ferry.Terminal.Name: Used for ferry incidents. This field indicates the ferry terminal where the incident took place.
+50.	Latitude:	Geo based Lat of the incident location
+51.	Longitude:	Geo based Long of the incident location
+52.	Location :	Combination of the geo based lat & long of the incident location
+
+##2. Columns dropped from NYC311
+The following columns identified to be removed are:
+1. Col#10 Street.Name  - is redundant with the column  Incident Address
+2. Col#18 Facility.Type - same & more specific information is given in column Location.Type
+3. Col#21 Resolution.Action.Update.Date -   all date info is got from Created Date, Closed Date and Due Date
+4. Col#24 & 25 X coordinate and Y coordinate - Longitude and Latitude will be used for mapping
+5. Col#27 &Col#22 Park.Borough and Community Board- is redundant with the column Borough
+6. Col#28 & 48 School.Name and Ferry.Terminal.Name - are redundant with the column Park.Facility.Name
+7. Col#29 School.Number - is a unique number for each school, but so is School.Code
+8. Col#30 School.Region - no value add
+9. Col#32 School.Phone.Number - no value add
+10. Col#33 School Address - is redudant with Incident Address
+11. Col#34&16 School.City & City - has many mispellings and odd entries
+12. Col#35 School.State - has a single value fr all rows "NY"
+13. Col#36 School.Zip - is the same as the column Incident.Zip
+14. Col#37 School.Not.Found - no value add. Has "Y"" for senior citizen complaints (deducable from Complaint.Type) and N or "" for others
+15. Col#38 School.or.Citywide.Complaint - is "School" or  "". Location.Type will indicate School for all rows concerning schools. 
+16. Col#51 Location - is redundant with columns Longitude and Latitude
+17. Col#44 Road.Ramp - is either Ramp or Roadway and doesnt add value to data
+18. Col#17 Landmark - the whole dataset has only 15 rows where this column in filled. So, it will not add much value to the analysis
+19. Col#47 Ferry.Direction -only 7 rows have values, hence wont add value to the analysis
+20. col#39, 40,41 Vehicle.Type, Taxi.Company.Borough, Taxi.Pick.Up.Location -10, 13 and 117 rows only. Hence can be removed
+
+##3. Data Dictionary of nycpop
+1.FIPS Code - Text data- Federal Information Processing Standards (FIPS) codes which identifies the differnt counties of New York.
+2.Geography - Text data- Gives the name of the county
+3.Year - Numeric- Gives the year
+4.Program Type -Text data - Could be "Postcensal Population estimate"/"Census Base population "/"Intercensal Population"
+5.Population - Numeric - Gives the number of residents
+
+##4. Data Dictionary of nycweather
+1. STATION -  (17 characters) is the station identification code.
+2. NAME -  (max 50 characters) is the name of the station (usually city/airport name)
+3. DATE - Date of weather measurement
+4. AWND - Average Wind Speed
+5. PRCP - Precipitation
+6. SNOW - Snowfall
+7. SNWD - Snow depth
+8. TAVG - Average temperature
+9. TMAX - Maximum temperature
+10.TMIN - Minimum temperature
+11.WESD - Water equivalent of snow on the ground
+12.WT01- Fog, ice fog, or freezing fog (may include heavy fog)
+13.WT02- Heavy fog or heaving freezing fog (not always distinguished from fog)
+14.WT03 - Thunder
+15.WT04 - Ice pellets, sleet, snow pellets, or small hail"
+16.WT05 - Hail (may include small hail)
+17.WT06 - Glaze or rime
+18.WT07 - Dust, volcanic ash, blowing dust, blowing sand, or blowing obstruction
+19.WT08 - Smoke or haze
+20.WT09 - Blowing or drifting snow
+21.WT11 - High or damaging winds
+22.WT13 - Mist
+23.WT14 - Drizzle
+24.WT15 - Freezing drizzle
+25.WT16 - Rain (may include freezing rain, drizzle, and freezing drizzle)"
+26.WT17 - Freezing rain
+27.WT18 - Snow, snow pellets, snow grains, or ice crystals
+28.WT19 - Unknown source of precipitation
+29.WT21 - Ground fog
+30.WT22 - Ice fog or freezing fog
